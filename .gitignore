@@ -1,0 +1,11 @@
+# JAMAIS ajouter tes sauvegardes privées à GitHub !
+*PRIVE*.json
+*PRIVÉ*.json
+*PRIVATE*.json
+*backup*.json
+*sauvegarde*.json
+DCS_HDV.xlsx
+*.xlsx
+.env
+.env.*
+node_modules/
