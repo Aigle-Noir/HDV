@@ -1,20 +1,4 @@
-# Horizon HDV — PWA Google Drive (GitHub Pages)
-
-**Application personnelle installable** : même présentation Premium Dark, AS332 illustré aux couleurs de l’Armée de Terre, saisie et statistiques en heures décimales (`1.5 h`, `2.25 h`). Contient le carnet, les qualifications, les échéances et l’export/import JSON.
-
-## Confidentialité — IMPORTANT
-
-- **L'archive publique ne contient aucun des 395 vols personnels.** Ne publiez jamais le classeur Excel ou le fichier de sauvegarde `Horizon_HDV_IMPORT_PRIVE_395_VOLS.json` sur GitHub.
-- Les données locales d'une ancienne version Horizon HDV sur **le même navigateur et la même origine** sont conservées (`horizon_hdv_pwa_storage_v1`). **Aucune migration des sauvegardes Supabase n'est automatique.** Vous pouvez exporter vos données actuelles avant la mise à jour.
-- Google Drive est un hébergeur externe : ne synchronisez **aucune donnée relative à une activité militaire sans l'autorisation correspondante**. Tester d'abord avec des vols fictifs. Ni ce code ni ces règles de péremption ne constituent une validation réglementaire.
-- Le dossier `appDataFolder` de Drive est privé à cette application et masqué dans l'interface ordinaire de Drive, mais **il ne remplace pas une classification ou une autorisation de sécurité**.
-
-## Étape 1 : publier sur GitHub Pages
-
-1. Depuis https://github.com/Aigle-Noir/HDV-DCS, déposez à la racine le **contenu** de cette archive (dont `index.html`, `app.js`, `style.css`, `sw.js`, `manifest.webmanifest`, les icônes et l’image AS332). Remplacez les anciens fichiers homonymes.
-2. GitHub → **Settings → Pages** → déployer la branche `main`, dossier `/ (root)` (si déjà activé, aucun changement).
-3. Ouvrez https://aigle-noir.github.io/HDV-DCS/ sur téléphone ou tablette. Si une ancienne PWA reste visible, rechargez la page ou fermez/réouvrez l’application. Le cache est versionné.
-
+https://aigle-noir.github.io/HDV/
 ## Étape 2 : configurer Google Cloud (une seule fois)
 
 1. Ouvrez https://console.cloud.google.com/ et créez ou sélectionnez un projet dédié « Horizon HDV ».
