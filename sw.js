@@ -1,5 +1,5 @@
 /* Horizon HDV PWA - static app shell only. Never cache Google Drive responses or personal backups. */
-const CACHE = 'horizon-hdv-pwa-drive-v2';
+const CACHE = 'horizon-hdv-pwa-drive-v3-auto';
 const SHELL = ['./','./index.html','./app.js','./style.css','./manifest.webmanifest','./icon.svg','./icon-192.png','./icon-512.png','./as332-armee-terre.jpg'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)).then(()=>self.skipWaiting())));
 self.addEventListener('activate', event => event.waitUntil((async()=>{const keys=await caches.keys();await Promise.all(keys.filter(k=>k.startsWith('horizon-hdv-')&&k!==CACHE).map(k=>caches.delete(k)));await self.clients.claim();})()));

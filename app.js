@@ -52,7 +52,7 @@
     const seed={flights:[],manual:{}};return {version:1,flights:JSON.parse(JSON.stringify(seed.flights)),manual:{...seed.manual},overrides:{},settings:{alertDays:30},modifiedAt:null};}
   let state=load();
   let page='dashboard';let flightQuery='';let flightType='all';let flightPeriod='all';let qFilter='all';let statsPeriod='12m';let statsType='all';let noticeTimer;
-  function persist(){state.modifiedAt=new Date().toISOString();try{localStorage.setItem(STORE,JSON.stringify(state));scheduleSync()}catch(e){toast('Enregistrement impossible : espace insuffisant ou stockage désactivé.')}}
+  function persist(){state.modifiedAt=new Date().toISOString();try{localStorage.setItem(STORE,JSON.stringify(state));queueAutoSync()}catch(e){toast('Enregistrement impossible : espace insuffisant ou stockage désactivé.')}}
   const eligible=f=>!FLYING_EXCLUDED.includes(f.function||'');
   const physical=f=>!DEV_TYPES.includes(f.type||'');
   const latest=arr=>arr.length?arr.map(x=>x.date).filter(Boolean).sort().pop():null;
@@ -157,6 +157,7 @@
   const DRIVE_CLIENT_STORE='horizon_hdv_pwa_drive_client_v1';
   const DRIVE_META_STORE='horizon_hdv_pwa_drive_sync_meta_v1';
   const DRIVE_FILE_NAME='horizon-hdv-backup.json';
+  const DRIVE_PENDING_STORE='horizon_hdv_pwa_drive_pending_v1';
   const DRIVE_SCOPE='https://www.googleapis.com/auth/drive.appdata';
   function readJson(key,fallback){try{return JSON.parse(localStorage.getItem(key))||fallback}catch(_){return fallback}}
   let syncConfig=readJson(DRIVE_CLIENT_STORE,{clientId:''});
@@ -164,24 +165,48 @@
   let syncAuth={accessToken:null,expiresAt:0};
   let tokenClient=null;
   let syncState={phase:'off',message:'Mode local. Configure un identifiant Google OAuth pour synchroniser.',remote:null};
-  let syncBusy=false,syncTimer=null;
+  let syncBusy=false,syncTimer=null,syncRetryTimer=null,syncRetryCount=0;
+  let pendingUpload=localStorage.getItem(DRIVE_PENDING_STORE)==='1';
   const stableStringify=value=>JSON.stringify(value,(_key,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v);
   const cloudJson=()=>stableStringify({version:1,flights:state.flights,manual:state.manual,overrides:state.overrides||{},settings:state.settings||{alertDays:30}});
   const hasLocalData=()=>Boolean(state.modifiedAt || state.flights.length || Object.keys(state.manual||{}).length || Object.keys(state.overrides||{}).length);
-  function syncLabel(){return ({off:'Local',ready:'Prêt à synchroniser',syncing:'Synchronisation…',ok:'Synchronisé',offline:'Hors ligne',error:'Erreur Drive',conflict:'Conflit à résoudre'})[syncState.phase]||'Local'}
+  function syncLabel(){return ({off:'Local',ready:'Prêt à synchroniser',pending:'En attente d’envoi',auth:'Reconnecter Google',syncing:'Synchronisation…',ok:'Synchronisé',offline:'Hors ligne',error:'Erreur Drive',conflict:'Conflit à résoudre'})[syncState.phase]||'Local'}
   function setSyncStatus(phase,message,remote=null){
     syncState={phase,message,remote};
     const badge=document.getElementById('syncBadge');if(badge){badge.textContent=syncLabel();badge.className='sync-badge '+(phase==='error'||phase==='conflict'?'error':phase==='offline'?'warning':'')}
+    const top=document.getElementById('topSyncStatus');if(top){top.textContent=({ok:'✓ Drive',syncing:'↥ Envoi',pending:'↥ En attente',auth:'! Reconnexion',offline:'! Hors ligne',conflict:'! Conflit',error:'! Erreur Drive',ready:'● Prêt',off:'● Local'})[phase]||'● Local';top.className='top-sync-status '+phase;top.title=message}
     const msg=document.getElementById('syncMessage');if(msg)msg.textContent=message;
-    const hero=document.getElementById('heroSyncStatus');if(hero)hero.textContent=phase==='ok'?'● DRIVE SYNCHRONISÉ':phase==='syncing'?'● SYNC EN COURS':phase==='conflict'?'● CONFLIT DRIVE':'● DONNÉES LOCALES';
+    const hero=document.getElementById('heroSyncStatus');if(hero)hero.textContent=phase==='ok'?'● DRIVE SYNCHRONISÉ':phase==='syncing'?'● SYNC EN COURS':phase==='conflict'?'● CONFLIT DRIVE':(phase==='pending'||phase==='offline'||phase==='auth'||phase==='error')?'● EN ATTENTE DRIVE':'● DONNÉES LOCALES';
     if(page==='settings'&&phase==='conflict')render();
   }
   function canSync(){return Boolean(syncAuth.accessToken&&Date.now()<syncAuth.expiresAt-60000)}
-  function scheduleSync(){if(!canSync()||syncState.phase==='conflict')return;clearTimeout(syncTimer);syncTimer=setTimeout(()=>cloudSync(false),1600)}
+  function savePending(value){pendingUpload=Boolean(value);if(pendingUpload)localStorage.setItem(DRIVE_PENDING_STORE,'1');else localStorage.removeItem(DRIVE_PENDING_STORE)}
+  function queueAutoSync(){
+    // Called by every local mutation. Never transmit without the user's initial Drive authorization.
+    savePending(true);clearTimeout(syncRetryTimer);
+    if(syncState.phase==='conflict')return;
+    if(!navigator.onLine){setSyncStatus('offline','Modification enregistrée ici. Envoi Drive automatique au retour du réseau (si Google est connecté).');return}
+    if(!canSync()){setSyncStatus('auth','Modification enregistrée ici. Reconnecte Google pour envoyer les changements en attente.');return}
+    setSyncStatus('pending','Modification enregistrée. Sauvegarde automatique sur Google Drive en attente…');
+    scheduleSync();
+  }
+  function scheduleSync(delay=1600){
+    clearTimeout(syncTimer);
+    if(syncState.phase==='conflict')return;
+    if(!navigator.onLine){if(pendingUpload)setSyncStatus('offline','Modifications en attente : synchronisation au retour du réseau.');return}
+    if(!canSync()){if(pendingUpload)setSyncStatus('auth','Modifications en attente : reconnecte-toi à Google pour reprendre la synchronisation.');return}
+    syncTimer=setTimeout(()=>cloudSync(false),delay);
+  }
+  function retrySync(){
+    if(syncState.phase==='conflict'||!canSync()||!navigator.onLine)return;
+    clearTimeout(syncRetryTimer);
+    const delay=[5000,15000,45000,120000][Math.min(syncRetryCount++,3)];
+    syncRetryTimer=setTimeout(()=>cloudSync(false),delay);
+  }
   function saveCloudConfig(form){
     const id=String(new FormData(form).get('clientId')||'').trim();
     if(!/^[0-9]+-[a-z0-9_-]+\.apps\.googleusercontent\.com$/i.test(id)){toast('Identifiant OAuth Google invalide : il doit terminer par .apps.googleusercontent.com');return}
-    if(syncConfig.clientId!==id){syncMeta={fileId:null,version:null,lastJson:null};localStorage.removeItem(DRIVE_META_STORE);syncAuth={accessToken:null,expiresAt:0};tokenClient=null}
+    if(syncConfig.clientId!==id){syncMeta={fileId:null,version:null,lastJson:null};localStorage.removeItem(DRIVE_META_STORE);syncAuth={accessToken:null,expiresAt:0};tokenClient=null;clearTimeout(syncRetryTimer);clearTimeout(syncTimer)}
     syncConfig={clientId:id};localStorage.setItem(DRIVE_CLIENT_STORE,JSON.stringify(syncConfig));
     setSyncStatus('off','Identifiant enregistré. Clique sur « Se connecter avec Google ».');render();toast('Configuration Google enregistrée.');
   }
@@ -199,7 +224,7 @@
           callback:async(response)=>{
             if(response.error || !response.access_token){setSyncStatus('error','Connexion Google refusée : '+String(response.error||'aucun jeton'));return}
             syncAuth={accessToken:response.access_token,expiresAt:Date.now()+(Number(response.expires_in)||3600)*1000};
-            setSyncStatus('ready','Google Drive autorisé pour cette session. Recherche du carnet…');render();await cloudSync(false);
+            setSyncStatus('ready','Google Drive autorisé pour cette session. Vérification des modifications en attente…');render();await cloudSync(false);
           },
           error_callback:err=>setSyncStatus('error','Fenêtre de connexion Google inaccessible : '+String(err?.type||'erreur pop-up'))
         });
@@ -209,9 +234,9 @@
   }
   function syncLogout(){
     if(syncAuth.accessToken&&window.google?.accounts?.oauth2?.revoke){try{google.accounts.oauth2.revoke(syncAuth.accessToken,()=>{})}catch(_){}}
-    syncAuth={accessToken:null,expiresAt:0};tokenClient=null;
-    // Keep the cloud revision metadata to preserve conflict safety on a future connection.
-    setSyncStatus('off','Déconnecté de Drive. Le carnet reste enregistré sur cet appareil.');render();
+    syncAuth={accessToken:null,expiresAt:0};tokenClient=null;clearTimeout(syncTimer);clearTimeout(syncRetryTimer);
+    // Keep the cloud revision metadata and pending edits to preserve conflict safety on reconnection.
+    setSyncStatus(pendingUpload?'auth':'off',pendingUpload?'Modifications enregistrées localement. Reconnecte Google pour les envoyer.':'Déconnecté de Drive. Le carnet reste enregistré sur cet appareil.');render();
   }
   async function driveRequest(path,options={}){
     if(!canSync())throw Error('Session Google expirée : reconnecte-toi avec Google.');
@@ -253,14 +278,16 @@
     return {fileId:file.id,version:String(file.version),payload};
   }
   function synced(file,snapshot){
-    syncMeta={fileId:file.fileId,version:String(file.version),lastJson:stableStringify(snapshot)};
+    syncMeta={fileId:file.fileId,version:String(file.version),lastJson:stableStringify(snapshot),lastSyncAt:new Date().toISOString()};
     localStorage.setItem(DRIVE_META_STORE,JSON.stringify(syncMeta));
-    setSyncStatus('ok','Synchronisé avec Google Drive · '+new Date().toLocaleString('fr-FR'));
+    // An edit can occur during an upload. Keep it queued instead of reporting success too early.
+    if(cloudJson()!==syncMeta.lastJson){savePending(true);setSyncStatus('pending','Une nouvelle modification attend son envoi automatique.');}
+    else {savePending(false);syncRetryCount=0;clearTimeout(syncRetryTimer);setSyncStatus('ok','Synchronisé automatiquement avec Google Drive · '+new Date().toLocaleString('fr-FR'));}
   }
   function applyRemote(snapshot){
     if(!snapshot||!Array.isArray(snapshot.flights)||!snapshot.manual||typeof snapshot.manual!=='object'||snapshot.flights.length>50000)throw Error('Sauvegarde Drive invalide');
     state={version:1,flights:snapshot.flights,manual:snapshot.manual,overrides:snapshot.overrides||{},settings:snapshot.settings||{alertDays:30},modifiedAt:new Date().toISOString()};
-    localStorage.setItem(STORE,JSON.stringify(state));render();
+    localStorage.setItem(STORE,JSON.stringify(state));savePending(false);render();
   }
   async function commitCloud(remote,snapshot){
     const body=JSON.stringify(snapshot);
@@ -285,8 +312,8 @@
   }
   async function cloudSync(manual){
     if(syncBusy||syncState.phase==='conflict')return;
-    if(!canSync()){if(manual)setSyncStatus('ready','Clique sur « Se connecter avec Google » pour autoriser Drive.');return}
-    if(!navigator.onLine){setSyncStatus('offline','Hors connexion : les modifications restent locales.');return}
+    if(!canSync()){if(manual||pendingUpload)setSyncStatus('auth','Connexion Google nécessaire pour synchroniser. Les changements restent sur cet appareil.');return}
+    if(!navigator.onLine){setSyncStatus('offline','Hors connexion : les modifications restent locales et seront renvoyées au retour du réseau.');return}
     syncBusy=true;setSyncStatus('syncing','Comparaison des données locales et de Google Drive…');
     try{
       const remote=await getRemote(),local=JSON.parse(cloudJson()),localJson=cloudJson();
@@ -308,8 +335,16 @@
       else setSyncStatus('conflict','Les deux appareils ont modifié le carnet. Aucune version n’est écrasée automatiquement.',remote);
     }catch(e){
       if(/REVISION_CONFLICT/.test(e.message))setSyncStatus('conflict','Drive a changé pendant l’envoi. Exporte une sauvegarde avant de choisir une version.');
-      else setSyncStatus(navigator.onLine?'error':'offline','Synchronisation impossible : '+e.message);
-    }finally{syncBusy=false;if(syncState.phase==='ok'&&syncMeta.lastJson!==cloudJson())scheduleSync()}
+      else if(/Session Google expirée|Session Google.*reconnect/i.test(e.message)){
+        syncAuth={accessToken:null,expiresAt:0};setSyncStatus('auth','Connexion Google expirée. Les modifications restent locales ; clique sur « Se connecter avec Google » pour les envoyer.');
+      }else{
+        setSyncStatus(navigator.onLine?'error':'offline','Sauvegarde automatique non terminée : '+e.message+(navigator.onLine?' · nouvelle tentative prévue.':''));
+        if(navigator.onLine&& !/Accès Drive refusé|Sauvegarde Google Drive invalide|Plusieurs sauvegardes|autre sauvegarde|Sauvegarde trop volumineuse/i.test(e.message))retrySync();
+      }
+    }finally{
+      syncBusy=false;
+      if(syncState.phase==='pending'||syncState.phase==='ok'&&syncMeta.lastJson!==cloudJson())scheduleSync();
+    }
   }
   async function useCloudVersion(){
     if(syncState.phase!=='conflict')return;
@@ -323,12 +358,14 @@
     try{const remote=await getRemote(),local=JSON.parse(cloudJson());const written=await commitCloud(remote,local);synced(written,local);toast('Version locale envoyée.');}
     catch(e){setSyncStatus('error','Envoi refusé : '+e.message)}
   }
-  window.addEventListener('online',()=>{if(canSync())cloudSync(false)});
-  document.addEventListener('visibilitychange',()=>{if(!document.hidden&&canSync())cloudSync(false)});
+  window.addEventListener('online',()=>{clearTimeout(syncRetryTimer);if(canSync())scheduleSync(250);else if(pendingUpload)setSyncStatus('auth','Connexion rétablie. Reconnecte Google pour envoyer les modifications en attente.');});
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden){if(canSync())scheduleSync(250);else if(pendingUpload)setSyncStatus('auth','Modifications en attente. Reconnecte Google pour terminer la sauvegarde.');}});
+  window.addEventListener('pageshow',()=>{if(canSync())scheduleSync(400)});
   function renderSettings(){const days=state.settings?.alertDays??30;return `${header('Réglages & sauvegarde','Données locales avec sauvegarde Google Drive facultative.','PARAMÈTRES')}
     <div class="section-head"><h2>Synchronisation téléphone / tablette</h2><span class="sync-badge ${syncState.phase==='error'||syncState.phase==='conflict'?'error':syncState.phase==='offline'?'warning':''}" id="syncBadge">${escape(syncLabel())}</span></div>
     <div class="sync-card"><div class="settings-title">Compte personnel Google Drive</div>
-    <p>Utilise le même compte Google sur téléphone et tablette. Seul le dossier privé <b>appDataFolder</b> est utilisé. La connexion Google nécessite Internet et peut devoir être renouvelée à chaque session ; les vols restent accessibles hors ligne. Les modifications hors connexion sont conservées localement.</p>
+    <p><b>Sauvegarde automatique activée :</b> après chaque ajout, modification ou suppression de vol, ainsi que chaque changement de qualification, Horizon HDV enregistre d’abord sur cet appareil puis tente l’envoi sur Drive (environ 2 secondes après la dernière modification). La connexion Google doit rester valide. En cas de coupure, l’envoi est mis en attente et repris après reconnexion. Les modifications sur un appareil sont récupérées sur l’autre lors de la synchronisation ou de son ouverture. Le dossier privé <b>appDataFolder</b> est utilisé.</p>
+    <div class="sync-small" role="status">${pendingUpload?'<b>● Changements locaux en attente d’envoi Drive.</b>':'● Aucun changement local en attente.'} ${syncMeta.lastSyncAt?'Dernière sauvegarde confirmée : '+escape(new Date(syncMeta.lastSyncAt).toLocaleString('fr-FR'))+'.':''}</div>
     <form id="driveConfigForm" class="sync-form">
       <div class="wide"><label for="googleClientId">Identifiant client OAuth Google (type Application Web)</label><input id="googleClientId" name="clientId" type="text" value="${escape(syncConfig.clientId||'')}" placeholder="123456789-abc.apps.googleusercontent.com" spellcheck="false" autocomplete="off" required></div>
       <div class="wide"><button type="submit" class="btn btn-soft btn-xs">Enregistrer l’identifiant</button></div>
@@ -340,6 +377,7 @@
       <button class="btn btn-ghost btn-xs" data-act="cloudLogout">Déconnexion</button>
     </div>
     ${syncState.phase==='conflict'?`<div class="sync-conflict"><strong>Deux versions différentes détectées</strong><p>Exporte un JSON sur chaque appareil avant toute action. Google Drive ne permet pas une fusion automatique garantie.</p><div class="sync-actions"><button class="btn btn-soft btn-xs" data-act="exportJson">Sauvegarder le local</button><button class="btn btn-ghost btn-xs" data-act="cloudUseRemote">Utiliser Drive</button><button class="btn btn-ghost btn-xs" data-act="cloudUseLocal">Envoyer le local</button></div></div>`:''}
+    <p class="sync-small">La toute première sauvegarde sur Drive doit être confirmée manuellement. Après celle-ci, les changements sont envoyés automatiquement tant que Google reste connecté. En cas d’expiration de la session OAuth, une reconnexion manuelle est indispensable : une PWA statique ne peut pas renouveler silencieusement l’autorisation Google. Il n’y a pas de synchronisation garantie lorsque l’application est fermée.</p>
     <p class="sync-small">Configuration unique : Google Cloud → activer Drive API, créer un client OAuth « Application Web », ajouter <b>https://aigle-noir.github.io</b> dans les origines JavaScript autorisées et autoriser ton compte dans « Audience / Utilisateurs tests » si l’application est en test. Aucun mot de passe ni clé API secrète dans Horizon HDV. Le dossier appDataFolder n’apparaît pas dans l’interface habituelle de Drive. Le contrôle des versions réduit les conflits, mais n’offre pas de protection atomique contre deux écritures exactement simultanées. Conserve des exports JSON réguliers.</p>
     </div>
     <div class="section-head"><h2>Sauvegarde des données</h2></div><div class="card"><div class="settings-card"><div><div class="settings-title">Exporter une sauvegarde JSON</div><div class="settings-desc">Contient tous les vols, dates manuelles et paramètres.</div></div><button class="btn btn-soft btn-xs" data-act="exportJson">Exporter</button></div><div class="settings-card"><div><div class="settings-title">Importer une sauvegarde JSON</div><div class="settings-desc">Remplace les données actuelles après confirmation.</div></div><button class="btn btn-soft btn-xs" data-act="importJson">Importer</button></div><div class="settings-card"><div><div class="settings-title">Exporter le carnet CSV</div><div class="settings-desc">Pour archivage ou ouverture dans un tableur.</div></div><button class="btn btn-soft btn-xs" data-act="exportCsv">Exporter</button></div></div>
@@ -384,6 +422,8 @@
   document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
   if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostname==='localhost'||location.hostname==='127.0.0.1'))navigator.serviceWorker.register('./sw.js').catch(()=>{});
   render();
+  // On a reload we cannot silently renew OAuth, but we must show any unsent edits.
+  if(pendingUpload&&!canSync())setSyncStatus('auth','Changements non encore envoyés sur Drive. Clique sur « Se connecter avec Google » pour terminer la synchronisation.');
   // Access tokens are not stored; connection requires an explicit Google sign-in gesture.
-  window.HDV_TEST={getState:()=>state,getSync:()=>({phase:syncState.phase,revision:syncMeta.version}),qualities:allStates,addMonths,expiryFor,stats:sums};
+  window.HDV_TEST={getState:()=>state,getSync:()=>({phase:syncState.phase,revision:syncMeta.version,pending:pendingUpload}),qualities:allStates,addMonths,expiryFor,stats:sums};
 })();
